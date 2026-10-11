@@ -288,8 +288,7 @@ def send_confirmation_dm(user_id):
             f"/channels/{channel_id}/messages",
             json={
                 "content": (
-                    "**Wunderbar.** Your verification is complete. "
-                    "Welcome to Serpent's Recital."
+                    "Wunderbar. **Your verification is complete.** "
                 )
             }
         )
