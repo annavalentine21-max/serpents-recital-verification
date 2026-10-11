@@ -263,7 +263,7 @@ def assign_verified_roles(user_id):
     )
     add_response.raise_for_status()
 
-    if UNVERIFIED_ROLE_ID in roles:
+    if str(UNVERIFIED_ROLE_ID) in roles:
         remove_response = discord_request(
             "DELETE",
             f"{base}/roles/{UNVERIFIED_ROLE_ID}"
