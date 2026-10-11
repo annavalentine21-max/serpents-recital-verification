@@ -252,7 +252,7 @@ def assign_verified_roles(user_id):
 
     roles = member_data.get("roles", [])
 
-    if VERIFIED_ROLE_ID in roles:
+    if str(VERIFIED_ROLE_ID) in roles:
         return True
 
     # Give Verified before removing Unverified, to avoid
