@@ -1,12 +1,18 @@
+import io
 import os
+import secrets
+import string
+import time
 
-import requests
-from flask import Flask, render_template_string, request
+from captcha.image import ImageCaptcha
+from flask import Flask, Response, redirect, render_template_string, request, session, url_for
 
 app = Flask(__name__)
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
 
-SITE_KEY = os.environ["TURNSTILE_SITE_KEY"]
-SECRET_KEY = os.environ["TURNSTILE_SECRET_KEY"]
+CAPTCHA_LENGTH = 8
+CAPTCHA_LIFETIME = 300
+MAX_ATTEMPTS = 5
 
 PAGE = """
 <!DOCTYPE html>
@@ -15,8 +21,6 @@ PAGE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Serpent's Recital | Verification</title>
-    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js"
-            async defer></script>
     <style>
         body {
             background: #101016;
@@ -32,79 +36,178 @@ PAGE = """
             background: #1b1923;
             border: 1px solid #68536f;
             border-radius: 12px;
-            padding: 40px;
-            max-width: 420px;
-            width: 85%;
+            padding: 35px;
+            max-width: 480px;
+            width: 88%;
             text-align: center;
         }
         h1 { color: #dfbde3; }
         p { line-height: 1.6; }
-        button {
+        .captcha-image {
+            max-width: 100%;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+        input {
+            padding: 12px;
+            width: 85%;
+            border-radius: 5px;
+            border: 1px solid #68536f;
+            font-size: 18px;
+            text-align: center;
+        }
+        button, .refresh {
+            display: inline-block;
             background: #74547e;
             color: white;
             padding: 12px 24px;
             border: none;
             border-radius: 6px;
             cursor: pointer;
-            margin-top: 20px;
+            margin-top: 18px;
+            text-decoration: none;
+            font-size: 15px;
         }
-        .cf-turnstile {
-            display: flex;
-            justify-content: center;
-            margin-top: 24px;
-        }
+        .error { color: #ff9c9c; }
     </style>
 </head>
 <body>
     <div class="panel">
         <h1>Serpent's Recital</h1>
-        <p>Complete the security check below to continue
-        your Discord server verification.</p>
+        <p>Enter the eight characters shown in the image
+        to complete the security check.</p>
 
-        <form method="POST">
-            <div class="cf-turnstile"
-                 data-sitekey="{{ site_key }}"></div>
+        {% if error %}
+            <p class="error">{{ error }}</p>
+        {% endif %}
+
+        <img class="captcha-image"
+             src="{{ url_for('captcha_image') }}"
+             alt="Distorted CAPTCHA characters">
+
+        <form method="POST" autocomplete="off">
+            <input type="text"
+                   name="answer"
+                   maxlength="8"
+                   placeholder="Enter characters"
+                   required
+                   autofocus>
             <button type="submit">Continue</button>
         </form>
+
+        <a class="refresh" href="{{ url_for('refresh_captcha') }}">
+            ↻ New Image
+        </a>
     </div>
 </body>
 </html>
 """
 
+SUCCESS_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Security Check Complete</title>
+    <style>
+        body {
+            background: #101016;
+            color: #dfbde3;
+            font-family: Georgia, serif;
+            text-align: center;
+            padding: 15vh 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Security Check Complete</h1>
+    <p>You have successfully solved the CAPTCHA.</p>
+    <p>Discord role verification is not connected yet.</p>
+</body>
+</html>
+"""
+
+
+def generate_captcha():
+    alphabet = string.ascii_uppercase + string.digits
+    answer = "".join(
+        secrets.choice(alphabet)
+        for _ in range(CAPTCHA_LENGTH)
+    )
+
+    session["captcha_answer"] = answer
+    session["captcha_created"] = time.time()
+    session["captcha_attempts"] = 0
+    session["captcha_passed"] = False
+
 
 @app.get("/")
 def home():
-    return render_template_string(PAGE, site_key=SITE_KEY)
+    if "captcha_answer" not in session:
+        generate_captcha()
+
+    return render_template_string(PAGE, error=None)
+
+
+@app.get("/captcha.png")
+def captcha_image():
+    answer = session.get("captcha_answer")
+
+    if not answer:
+        generate_captcha()
+        answer = session["captcha_answer"]
+
+    image = ImageCaptcha(width=350, height=110)
+    data = image.generate(answer)
+
+    return Response(
+        data.getvalue(),
+        mimetype="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/refresh")
+def refresh_captcha():
+    generate_captcha()
+    return redirect(url_for("home"))
 
 
 @app.post("/")
 def verify():
-    captcha_token = request.form.get("cf-turnstile-response", "")
+    answer = session.get("captcha_answer")
+    created = session.get("captcha_created", 0)
+    attempts = session.get("captcha_attempts", 0)
 
-    if not captcha_token:
-        return "Please complete the security check.", 400
+    if not answer or time.time() - created > CAPTCHA_LIFETIME:
+        generate_captcha()
+        return render_template_string(
+            PAGE,
+            error="The CAPTCHA expired. Please try the new image.",
+        ), 400
 
-    try:
-        response = requests.post(
-            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-            data={
-                "secret": SECRET_KEY,
-                "response": captcha_token,
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        result = response.json()
-    except (requests.RequestException, ValueError):
-        return "Verification service unavailable. Contact staff.", 503
+    if attempts >= MAX_ATTEMPTS:
+        generate_captcha()
+        return render_template_string(
+            PAGE,
+            error="Too many attempts. A new CAPTCHA has been generated.",
+        ), 429
 
-    if not result.get("success"):
-        return "Security check failed. Please try again.", 403
+    session["captcha_attempts"] = attempts + 1
+    submitted = request.form.get("answer", "").strip().upper()
 
-    return (
-        "Security check passed! Discord role verification "
-        "is not connected yet. Please contact staff."
-    )
+    if not secrets.compare_digest(submitted, answer):
+        return render_template_string(
+            PAGE,
+            error="Incorrect characters. Please try again.",
+        ), 403
+
+    session.pop("captcha_answer", None)
+    session.pop("captcha_created", None)
+    session.pop("captcha_attempts", None)
+    session["captcha_passed"] = True
+
+    return SUCCESS_PAGE
 
 
 if __name__ == "__main__":
